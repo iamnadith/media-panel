@@ -2212,9 +2212,13 @@ const ensureRegistrationStatusTable = async (env: Env) => {
         WHERE status='detected'
       `;
       await sql`
-        CREATE INDEX IF NOT EXISTS worker_registration_status_source_url_idx
+      CREATE INDEX IF NOT EXISTS worker_registration_status_source_url_idx
         ON worker_registration_status (source_url)
         WHERE source_url IS NOT NULL
+      `;
+      await sql`
+        CREATE INDEX IF NOT EXISTS worker_registration_status_maintenance_idx
+        ON worker_registration_status (status, updated_at ASC, url ASC)
       `;
     })();
   }
@@ -2235,13 +2239,27 @@ const clearStaleRegistrationStatuses = async (env: Env) => {
   // Remove the misleading legacy marker from rows that were never claimed.
   // Their normal state is detected, and they remain eligible for FIFO work.
   await sql`
-    UPDATE worker_registration_status
+    WITH candidates AS (
+      SELECT ctid FROM worker_registration_status
+      WHERE status='detected'
+        AND error_message=${STALE_REGISTRATION_ERROR_MESSAGE}
+      ORDER BY updated_at ASC, url ASC
+      LIMIT 100
+    )
+    UPDATE worker_registration_status s
     SET error_message=NULL
-    WHERE status='detected'
-      AND error_message=${STALE_REGISTRATION_ERROR_MESSAGE}
+    FROM candidates
+    WHERE s.ctid=candidates.ctid
   `;
   await sql`
-    UPDATE worker_registration_status
+    WITH candidates AS (
+      SELECT ctid FROM worker_registration_status
+      WHERE status='registering'
+        AND updated_at < now() - (${String(minutes)} || ' minutes')::interval
+      ORDER BY updated_at ASC, url ASC
+      LIMIT 25
+    )
+    UPDATE worker_registration_status s
     SET
       status='detected',
       error_message=${STALE_REGISTRATION_ERROR_MESSAGE},
@@ -2249,8 +2267,8 @@ const clearStaleRegistrationStatuses = async (env: Env) => {
     -- A detected row has not started an attempt. Rewriting it as "stalled"
     -- made an idle backlog look like every file had failed. Only recover a
     -- file that was actually claimed and left in registering.
-    WHERE status='registering'
-      AND updated_at < now() - (${String(minutes)} || ' minutes')::interval
+    FROM candidates
+    WHERE s.ctid=candidates.ctid
   `;
 };
 
@@ -2261,33 +2279,48 @@ const clearOldCompletedRegistrationStatuses = async (env: Env) => {
     max: 365,
   });
   await sql`
-    DELETE FROM worker_registration_status
-    WHERE status IN ('registered', 'error')
-      AND updated_at < now() - (${String(days)} || ' days')::interval
+    WITH candidates AS (
+      SELECT ctid FROM worker_registration_status
+      WHERE status IN ('registered', 'error')
+        AND updated_at < now() - (${String(days)} || ' days')::interval
+      ORDER BY updated_at ASC, url ASC
+      LIMIT 100
+    )
+    DELETE FROM worker_registration_status s
+    USING candidates
+    WHERE s.ctid=candidates.ctid
   `;
 };
 
 const clearResolvedRegistrationStatuses = async (env: Env) => {
   const sql = sqlForEnv(env);
   await sql`
-    DELETE FROM worker_registration_status s
-    WHERE EXISTS (
-      SELECT 1
-      FROM media m
-      WHERE (s.media_id IS NOT NULL AND m.id=s.media_id)
-        OR m.url=s.url
-        OR (s.source_url IS NOT NULL AND m.url=s.source_url)
-    )
-      OR EXISTS (
+    WITH candidates AS (
+      SELECT s.ctid
+      FROM worker_registration_status s
+      WHERE EXISTS (
         SELECT 1
-        FROM registered_upload_file_map f
-        WHERE (s.media_id IS NOT NULL AND f.media_id=s.media_id)
-          OR f.stored_url=s.url
-          OR (
-            s.source_url IS NOT NULL
-            AND (f.source_url=s.source_url OR f.stored_url=s.source_url)
-          )
+        FROM media m
+        WHERE (s.media_id IS NOT NULL AND m.id=s.media_id)
+          OR m.url=s.url
+          OR (s.source_url IS NOT NULL AND m.url=s.source_url)
       )
+        OR EXISTS (
+          SELECT 1
+          FROM registered_upload_file_map f
+          WHERE (s.media_id IS NOT NULL AND f.media_id=s.media_id)
+            OR f.stored_url=s.url
+            OR (
+              s.source_url IS NOT NULL
+              AND (f.source_url=s.source_url OR f.stored_url=s.source_url)
+            )
+        )
+      ORDER BY s.updated_at ASC, s.url ASC
+      LIMIT 100
+    )
+    DELETE FROM worker_registration_status s
+    USING candidates
+    WHERE s.ctid=candidates.ctid
   `;
 };
 
@@ -3105,11 +3138,11 @@ const scanAndRegisterWithLease = async (
       registrationRows,
     );
     const protectedRegistrationDestinationUrls = new Set<string>();
-    await Promise.all(registrationRows.map(async row => {
+    for (const row of registrationRows) {
       const sourceUrl = trimToUndefined(row.source_url) || trimToUndefined(row.url);
-      if (!sourceUrl) { return; }
+      if (!sourceUrl) { continue; }
       const sourceKey = keyFromStorageUrl(env, sourceUrl);
-      if (!sourceKey || !objectsByKey.has(sourceKey)) { return; }
+      if (!sourceKey || !objectsByKey.has(sourceKey)) { continue; }
       const expectedUrl = await getExpectedRegistrationUrlForStatusRow(env, row)
         .catch(() => undefined);
       if (expectedUrl && isProtectedRegistrationDestination({
@@ -3120,7 +3153,7 @@ const scanAndRegisterWithLease = async (
       })) {
         protectedRegistrationDestinationUrls.add(expectedUrl);
       }
-    }));
+    }
 
     const knownUrls = new Set<string>();
     rows.forEach(row => {
