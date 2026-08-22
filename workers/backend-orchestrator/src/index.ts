@@ -228,7 +228,7 @@ const GENERATED_MEDIA_SUFFIX_REGEX =
 const STALE_REGISTRATION_ERROR_MESSAGE =
   'Previous registration attempt stalled; queued for retry';
 const MISSING_UPLOAD_ERROR_PREFIX = 'Upload not found in storage';
-const WORKER_BUILD_ID = 'registration-queue-v43';
+const WORKER_BUILD_ID = 'registration-queue-v44';
 // A scheduled Worker must finish promptly. Drive copies can become visible
 // asynchronously, so persist the in-flight state and check again on the next
 // minute instead of polling long enough to lose the registration lease.
@@ -860,6 +860,15 @@ const connectionStringWithoutSslMode = (value: string) => {
     return value;
   }
 };
+// DISABLE_POSTGRES_SSL is a local compatibility escape hatch. Cloudflare's
+// pg adapter uses the native TCP socket API and must negotiate TLS with the
+// public Supabase pooler; a plaintext Worker connection can hang until the
+// socket timeout rather than returning a useful database error.
+const isCloudflareWorkerRuntime = () =>
+  typeof navigator === 'object' && navigator !== null &&
+  navigator.userAgent === 'Cloudflare-Workers';
+const shouldUsePostgresTls = (env: Env) =>
+  isCloudflareWorkerRuntime() || env.DISABLE_POSTGRES_SSL !== '1';
 const isRetryableSupabaseConnectionError = (error: unknown) =>
   /connection terminated unexpectedly|connection reset|econnreset|socket closed/i
     .test(error instanceof Error ? error.message : String(error));
@@ -879,9 +888,9 @@ const supabaseSqlForEnv = (env: Env): SqlQuery => {
       // events: the runtime may reclaim the socket after a prior invocation.
       const client = new Client({
         connectionString: connectionStringWithoutSslMode(env.POSTGRES_URL),
-        ssl: env.DISABLE_POSTGRES_SSL === '1'
-          ? false
-          : { rejectUnauthorized: false },
+        ssl: shouldUsePostgresTls(env)
+          ? { rejectUnauthorized: false }
+          : false,
         connectionTimeoutMillis: SUPABASE_CONNECT_TIMEOUT_MS,
         query_timeout: SUPABASE_QUERY_TIMEOUT_MS,
         statement_timeout: SUPABASE_QUERY_TIMEOUT_MS,

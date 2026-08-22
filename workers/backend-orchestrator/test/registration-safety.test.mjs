@@ -238,6 +238,12 @@ test('Supabase scans use a fresh bounded client and retry a dropped connection',
   assert.doesNotMatch(workerSource, /new Pool\(/);
 });
 
+test('Cloudflare database sockets keep TLS enabled even for local SSL escape hatches', () => {
+  assert.match(workerSource, /const shouldUsePostgresTls = \(env: Env\) =>/);
+  assert.match(workerSource, /isCloudflareWorkerRuntime\(\) \|\| env\.DISABLE_POSTGRES_SSL !== '1'/);
+  assert.match(workerSource, /ssl: shouldUsePostgresTls\(env\)/);
+});
+
 test('optional upload hints cannot abort a registration scan', () => {
   assert.match(workerSource, /lookupUrls\.length; offset \+= 200/);
   assert.match(workerSource, /Upload registration hints unavailable; continuing without hints/);
