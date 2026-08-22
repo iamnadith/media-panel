@@ -87,6 +87,7 @@ export interface Env {
   BACKEND_PROCESSOR_IDLE_INTERVAL_MS?: string
   BACKEND_PROCESSOR_HEARTBEAT_INTERVAL_MS?: string
   BACKEND_PROCESSOR_CLAIM_LIMIT?: string
+  REGISTRATION_HINT_LOOKUPS_ENABLED?: string
 }
 
 type RuntimeProcessingSettings = {
@@ -226,7 +227,7 @@ const GENERATED_MEDIA_SUFFIX_REGEX =
 const STALE_REGISTRATION_ERROR_MESSAGE =
   'Previous registration attempt stalled; queued for retry';
 const MISSING_UPLOAD_ERROR_PREFIX = 'Upload not found in storage';
-const WORKER_BUILD_ID = 'registration-retry-v37-hints';
+const WORKER_BUILD_ID = 'registration-retry-v39';
 // A scheduled Worker must finish promptly. Drive copies can become visible
 // asynchronously, so persist the in-flight state and check again on the next
 // minute instead of polling long enough to lose the registration lease.
@@ -1996,6 +1997,11 @@ const ensureUploadRegistrationHintsColumnTypes = async (env: Env) => {
 
 const getUploadRegistrationHints = async (env: Env, urls: string[]) => {
   if (urls.length === 0) {
+    return new Map<string, UploadRegistrationHintRow>();
+  }
+  // Hints are optional metadata. Keep this disabled by default so a dropped
+  // pooler connection can never block the critical registration path.
+  if (env.REGISTRATION_HINT_LOOKUPS_ENABLED !== '1') {
     return new Map<string, UploadRegistrationHintRow>();
   }
   try {
