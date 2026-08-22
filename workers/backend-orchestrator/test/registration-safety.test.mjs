@@ -150,6 +150,12 @@ test('status polling does not fan out database connections', () => {
   assert.doesNotMatch(source, /getDeletionQueueCounts\(env\)/);
   assert.match(source, /Keep the[\s\S]*admin snapshot to one session/);
   assert.match(source, /COALESCE\(\([\s\S]*?registration_snapshot/);
+
+  const routeStart = workerSource.indexOf("if (url.pathname === '/status')");
+  const routeEnd = workerSource.indexOf("if (url.pathname === '/logs'", routeStart);
+  const routeSource = workerSource.slice(routeStart, routeEnd);
+  assert.doesNotMatch(routeSource, /getRuntimeProcessingSettings/);
+  assert.doesNotMatch(routeSource, /Promise\.all/);
 });
 
 test('registration status and logs expose file-level queue progress', () => {

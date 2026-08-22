@@ -228,7 +228,7 @@ const GENERATED_MEDIA_SUFFIX_REGEX =
 const STALE_REGISTRATION_ERROR_MESSAGE =
   'Previous registration attempt stalled; queued for retry';
 const MISSING_UPLOAD_ERROR_PREFIX = 'Upload not found in storage';
-const WORKER_BUILD_ID = 'registration-queue-v42';
+const WORKER_BUILD_ID = 'registration-queue-v43';
 // A scheduled Worker must finish promptly. Drive copies can become visible
 // asynchronously, so persist the in-flight state and check again on the next
 // minute instead of polling long enough to lose the registration lease.
@@ -4525,11 +4525,10 @@ export default {
         return json(401, { error: 'Unauthorized' });
       }
       try {
-        const [settings, snapshot] = await Promise.all([
-          getRuntimeProcessingSettings(env),
-          status(env),
-        ]);
-        return json(200, { ...snapshot, settings });
+        // Runtime settings initialize a table and require another short-lived
+        // pooler session. They are not needed to answer a health snapshot, so
+        // never allow that optional work to delay queue visibility.
+        return json(200, await status(env));
       } catch (error: any) {
         return json(500, { error: error?.message || 'Status failed' });
       }
