@@ -920,7 +920,7 @@ const addUpload = async ({
         if (albumIds.length > 0) {
           await addMediaAlbumIds([photo.id], albumIds);
         }
-        if (photo.mediaType === 'video' && hasProcessingOrchestrator()) {
+        if (photo.mediaType === 'video' && await hasProcessingOrchestrator()) {
           after(() => triggerProcessingOrchestrator().catch(error => {
             console.error('Failed to trigger Backend Orchestrator', error);
             return false;
@@ -2060,7 +2060,7 @@ export const syncMediaAction = async (
     if (!photo) { return; }
 
     if (
-      hasProcessingOrchestrator() &&
+      await hasProcessingOrchestrator() &&
       await shouldForceVideoProcessingOnSync(photo)
     ) {
       const queuedPhoto = convertMediaToMediaDbInsert(photo);

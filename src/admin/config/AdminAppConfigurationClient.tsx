@@ -48,6 +48,8 @@ import {
   SITE_ACCESS_SETTINGS_DEFAULTS,
   type SiteAccessSettings,
 } from '@/auth/site-access-schema';
+import CloudflareWorkerIntegrationForm from './CloudflareWorkerIntegrationForm';
+import type { CloudflareWorkerIntegrationStatus } from '@/processing/cloudflare-worker-integration';
 
 export default function AdminAppConfigurationClient({
   // Storage
@@ -159,6 +161,7 @@ export default function AdminAppConfigurationClient({
   isAnalyzingConfiguration,
   processingSettings = PROCESSING_SETTINGS_DEFAULTS,
   siteAccessSettings = SITE_ACCESS_SETTINGS_DEFAULTS,
+  cloudflareWorkerIntegration = { configured: false },
 }: AppConfiguration &
   { secret: string } &
   Partial<Awaited<ReturnType<typeof testConnectionsAction>>> & {
@@ -166,6 +169,7 @@ export default function AdminAppConfigurationClient({
     isAnalyzingConfiguration?: boolean
     processingSettings?: ProcessingSettings
     siteAccessSettings?: SiteAccessSettings
+    cloudflareWorkerIntegration?: CloudflareWorkerIntegrationStatus
   }) {
   const [hasScrolled, setHasScrolled] = useState(false);
   const hasPrimaryStorageProvider =
@@ -403,16 +407,13 @@ export default function AdminAppConfigurationClient({
         return <>
           <ChecklistRow
             title="Backend Orchestrator"
-            status={hasBackendOrchestrator}
+            status={cloudflareWorkerIntegration.configured || hasBackendOrchestrator}
           >
-            {backendOrchestratorBaseUrl &&
-              renderContent(backendOrchestratorBaseUrl)}
-            Add the deployed Backend Orchestrator URL and its panel key:
-            {renderEnvVars([
-              'BACKEND_ORCHESTRATOR_BASE_URL',
-              'BACKEND_ORCHESTRATOR_SHARED_SECRET',
-            ])}
+            {cloudflareWorkerIntegration.configured
+              ? renderContent(cloudflareWorkerIntegration.workerUrl)
+              : 'Deploy it here with a Cloudflare API token. No Worker URL, shared secret, or Hyperdrive ID is entered manually.'}
           </ChecklistRow>
+          <div className="p-3 sm:p-4"><CloudflareWorkerIntegrationForm status={cloudflareWorkerIntegration} /></div>
           <ChecklistRow
             title="Backend Processor authentication"
             status={hasBackendProcessorSecret}

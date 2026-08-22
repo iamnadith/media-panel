@@ -1,101 +1,31 @@
-import {
-  BACKEND_ORCHESTRATOR_BASE_URL,
-  BACKEND_ORCHESTRATOR_SHARED_SECRET,
-} from '@/app/config';
+import { getBackendOrchestratorIntegration } from './cloudflare-worker-integration';
 import { getProcessingSettingsSafe } from './settings';
 
-export const hasProcessingOrchestrator = () =>
-  Boolean(
-    BACKEND_ORCHESTRATOR_BASE_URL &&
-    BACKEND_ORCHESTRATOR_SHARED_SECRET,
-  );
-
-export type ProcessingOrchestratorRunResult = {
-  triggered: boolean
-  registeringUrls?: string[]
+export const hasProcessingOrchestrator = async () => Boolean(await getBackendOrchestratorIntegration());
+export type ProcessingOrchestratorRunResult = { triggered: boolean; registeringUrls?: string[] };
+const call = async (pathname: string, init?: RequestInit) => {
+  const integration = await getBackendOrchestratorIntegration();
+  if (!integration) return undefined;
+  return fetch(`${integration.baseUrl.replace(/\/+$/, '')}${pathname}`, { ...init, headers: { Authorization: `Bearer ${integration.sharedSecret}`, ...(init?.headers || {}) } });
 };
-
 export const runProcessingOrchestrator = async () => {
   const settings = await getProcessingSettingsSafe();
-  if (!settings.orchestratorEnabled || !settings.registrationEnabled) {
-    return { triggered: false } satisfies ProcessingOrchestratorRunResult;
-  }
-  if (!hasProcessingOrchestrator()) {
-    return { triggered: false } satisfies ProcessingOrchestratorRunResult;
-  }
-
-  const baseUrl = BACKEND_ORCHESTRATOR_BASE_URL!.replace(/\/+$/, '');
-  const response = await fetch(`${baseUrl}/run`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${BACKEND_ORCHESTRATOR_SHARED_SECRET}`,
-    },
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(
-      text || `Backend Orchestrator failed (${response.status})`,
-    );
-  }
-
-  const data = await response.json().catch(() => ({})) as Omit<
-    ProcessingOrchestratorRunResult,
-    'triggered'
-  >;
-  return {
-    triggered: true,
-    ...data,
-  } satisfies ProcessingOrchestratorRunResult;
+  if (!settings.orchestratorEnabled || !settings.registrationEnabled) return { triggered: false } satisfies ProcessingOrchestratorRunResult;
+  const response = await call('/run', { method: 'POST' });
+  if (!response) return { triggered: false } satisfies ProcessingOrchestratorRunResult;
+  if (!response.ok) throw new Error(await response.text().catch(() => '') || `Backend Orchestrator failed (${response.status})`);
+  return { triggered: true, ...await response.json().catch(() => ({})) } satisfies ProcessingOrchestratorRunResult;
 };
-
-export const retryWorkerRegistration = async ({
-  url,
-  sourceUrl,
-}: {
-  url: string
-  sourceUrl?: string
-}) => {
-  if (!hasProcessingOrchestrator()) {
-    return { triggered: false };
-  }
-  const baseUrl = BACKEND_ORCHESTRATOR_BASE_URL!.replace(/\/+$/, '');
-  const response = await fetch(`${baseUrl}/registration/retry`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${BACKEND_ORCHESTRATOR_SHARED_SECRET}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ url, sourceUrl }),
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(text || `Registration retry failed (${response.status})`);
-  }
-  return {
-    triggered: true,
-    ...await response.json().catch(() => ({})),
-  };
+export const retryWorkerRegistration = async ({ url, sourceUrl }: { url: string; sourceUrl?: string }) => {
+  const response = await call('/registration/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, sourceUrl }) });
+  if (!response) return { triggered: false };
+  if (!response.ok) throw new Error(await response.text().catch(() => '') || `Registration retry failed (${response.status})`);
+  return { triggered: true, ...await response.json().catch(() => ({})) };
 };
-
-export const triggerProcessingOrchestrator = async () => {
-  const result = await runProcessingOrchestrator();
-  return result.triggered;
-};
-
+export const triggerProcessingOrchestrator = async () => (await runProcessingOrchestrator()).triggered;
 export const triggerDeletionOrchestrator = async () => {
-  if (!hasProcessingOrchestrator()) { return false; }
-  const baseUrl = BACKEND_ORCHESTRATOR_BASE_URL!.replace(/\/+$/, '');
-  const response = await fetch(`${baseUrl}/deletions/run`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${BACKEND_ORCHESTRATOR_SHARED_SECRET}`,
-    },
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(
-      text || `Backend deletion queue failed (${response.status})`,
-    );
-  }
+  const response = await call('/deletions/run', { method: 'POST' });
+  if (!response) return false;
+  if (!response.ok) throw new Error(await response.text().catch(() => '') || `Backend deletion queue failed (${response.status})`);
   return true;
 };

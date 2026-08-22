@@ -2,7 +2,8 @@
   "name": "media-panel",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/build-backend-orchestrator-bundle.mjs && next build",
+    "build:worker-bundle": "node scripts/build-backend-orchestrator-bundle.mjs",
     "start": "next start",
     "upload:folder": "python tools/media-panel-folder-uploader/upload_folder.py",
     "lint": "eslint .",

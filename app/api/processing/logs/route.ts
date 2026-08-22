@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { isSessionAuthorized } from '@/auth/api';
-import {
-  BACKEND_ORCHESTRATOR_BASE_URL,
-  BACKEND_ORCHESTRATOR_SHARED_SECRET,
-} from '@/app/config';
+import { getBackendOrchestratorIntegration } from '@/processing/cloudflare-worker-integration';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -12,8 +9,8 @@ export async function GET(request: NextRequest) {
   if (!await isSessionAuthorized('edit')) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
-  if (!BACKEND_ORCHESTRATOR_BASE_URL ||
-    !BACKEND_ORCHESTRATOR_SHARED_SECRET) {
+  const integration = await getBackendOrchestratorIntegration();
+  if (!integration) {
     return NextResponse.json({ configured: false, logs: [] });
   }
 
@@ -24,10 +21,10 @@ export async function GET(request: NextRequest) {
 
   try {
     const response = await fetch(
-      `${BACKEND_ORCHESTRATOR_BASE_URL.replace(/\/+$/, '')}/logs?limit=${limit}`,
+      `${integration.baseUrl.replace(/\/+$/, '')}/logs?limit=${limit}`,
       {
         headers: {
-          Authorization: `Bearer ${BACKEND_ORCHESTRATOR_SHARED_SECRET}`,
+          Authorization: `Bearer ${integration.sharedSecret}`,
         },
         cache: 'no-store',
         signal: AbortSignal.timeout(20_000),

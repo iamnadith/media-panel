@@ -20,10 +20,9 @@ import path from 'path';
 import sleep from '@/utility/sleep';
 import {
   GENERATE_STREAM_DERIVATIVES,
-  BACKEND_ORCHESTRATOR_BASE_URL,
-  BACKEND_ORCHESTRATOR_SHARED_SECRET,
   UNIQUE_MEDIA_NAMES,
 } from '@/app/config';
+import { hasProcessingOrchestrator } from '@/processing/orchestrator';
 
 const VIDEO_EXTENSIONS = new Set([
   'mp4', 'mkv', 'mov', 'm4v', 'webm', 'avi', 'ts', 'm2ts', 'mts',
@@ -33,10 +32,6 @@ const PREVIEW_DURATION_SECONDS = 10;
 const PREVIEW_MAX_DURATION_RATIO = 0.3;
 const PREVIEW_MAX_WIDTH = 720;
 const GENERATED_MEDIA_ID_PATTERN = /^\d{12}$/;
-const HAS_BACKEND_ORCHESTRATOR = Boolean(
-  BACKEND_ORCHESTRATOR_BASE_URL &&
-  BACKEND_ORCHESTRATOR_SHARED_SECRET,
-);
 
 type FfmpegModule = typeof import('fluent-ffmpeg');
 
@@ -895,7 +890,7 @@ const convertUploadToMediaInternal = async ({
   const videoTooling = await getVideoTooling();
   const canProcessVideo = videoTooling.canProcess && Boolean(videoTooling.ffmpeg);
   const shouldQueueForExternalProcessor =
-    !canProcessVideo && HAS_BACKEND_ORCHESTRATOR;
+    !canProcessVideo && await hasProcessingOrchestrator();
   const shouldTranscodeNow = !deferTranscode && canProcessVideo;
 
   let posterUrl: string | undefined;
