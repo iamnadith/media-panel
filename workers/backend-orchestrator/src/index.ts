@@ -88,6 +88,7 @@ export interface Env {
   BACKEND_PROCESSOR_HEARTBEAT_INTERVAL_MS?: string
   BACKEND_PROCESSOR_CLAIM_LIMIT?: string
   REGISTRATION_HINT_LOOKUPS_ENABLED?: string
+  STORAGE_SCAN_PAGE_SIZE?: string
 }
 
 type RuntimeProcessingSettings = {
@@ -227,7 +228,7 @@ const GENERATED_MEDIA_SUFFIX_REGEX =
 const STALE_REGISTRATION_ERROR_MESSAGE =
   'Previous registration attempt stalled; queued for retry';
 const MISSING_UPLOAD_ERROR_PREFIX = 'Upload not found in storage';
-const WORKER_BUILD_ID = 'registration-retry-v39';
+const WORKER_BUILD_ID = 'registration-queue-v40';
 // A scheduled Worker must finish promptly. Drive copies can become visible
 // asynchronously, so persist the in-flight state and check again on the next
 // minute instead of polling long enough to lose the registration lease.
@@ -238,6 +239,10 @@ export const DRIVE_COPY_REQUEST_TIMEOUT_MS = 15_000;
 // A registration scan owns a global lease. Bound every Drive operation in its
 // path so one stalled request cannot block all later scans indefinitely.
 const REGISTRATION_STORAGE_TIMEOUT_MS = 30_000;
+// Discovery is deliberately smaller than the registration queue. Cloudflare
+// Workers must never deserialize an entire bucket just to find one file.
+const DEFAULT_STORAGE_SCAN_PAGE_SIZE = 100;
+const MAX_STORAGE_SCAN_PAGE_SIZE = 1_000;
 const DELETION_STORAGE_TIMEOUT_MS = 15_000;
 const DELETION_MUTATION_TIMEOUT_MS = 45_000;
 const DELETION_MUTATION_CONCURRENCY = 4;
@@ -1166,12 +1171,29 @@ const r2Request = async (
   return response;
 };
 
-const listAllObjects = async (env: Env) => {
+type StorageListPage = {
+  objects: R2ObjectLike[]
+  nextCursor?: string
+};
+
+const listStorageObjectPage = async (
+  env: Env,
+  continuationToken?: string,
+): Promise<StorageListPage> => {
+  const pageSize = getNumber(
+    env.STORAGE_SCAN_PAGE_SIZE,
+    DEFAULT_STORAGE_SCAN_PAGE_SIZE,
+    { min: 1, max: MAX_STORAGE_SCAN_PAGE_SIZE },
+  );
   if (isDriveStorageEnabled(env)) {
     const listUrl = new URL(`${driveApiBaseUrl(env)}/api/v1/storage/list`);
     listUrl.searchParams.set('projectId', env.DRIVE_STORAGE_PROJECT_ID || '');
     listUrl.searchParams.set('bucket', env.DRIVE_STORAGE_BUCKET || '');
-    listUrl.searchParams.set('limit', '200000');
+    listUrl.searchParams.set('paged', '1');
+    listUrl.searchParams.set('limit', String(pageSize));
+    if (continuationToken) {
+      listUrl.searchParams.set('continuationToken', continuationToken);
+    }
     const response = await fetch(listUrl.toString(), {
       headers: driveHeaders(env),
       signal: AbortSignal.timeout(REGISTRATION_STORAGE_TIMEOUT_MS),
@@ -1181,60 +1203,51 @@ const listAllObjects = async (env: Env) => {
     }
     const data = await response.json() as {
       objects?: Array<{ key: string, uploadedAt?: string | null, size?: number }>
+      nextContinuationToken?: string | null
     };
-    return (data.objects || []).map(object => ({
-      key: object.key,
-      uploaded: object.uploadedAt ? new Date(object.uploadedAt) : undefined,
-      size: typeof object.size === 'number' ? object.size : undefined,
-    }));
+    return {
+      objects: (data.objects || []).map(object => ({
+        key: object.key,
+        uploaded: object.uploadedAt ? new Date(object.uploadedAt) : undefined,
+        size: typeof object.size === 'number' ? object.size : undefined,
+      })),
+      nextCursor: trimToUndefined(data.nextContinuationToken || undefined),
+    };
   }
-
-  const objects: R2ObjectLike[] = [];
-  let continuationToken: string | undefined;
-
-  while (true) {
-    const query = new URLSearchParams({
-      'list-type': '2',
-      'max-keys': '1000',
-    });
-    if (continuationToken) {
-      query.set('continuation-token', continuationToken);
-    }
-
-    const response = await r2Request(env, 'GET', '', { query });
-    const xml = await response.text();
-
-    const contents = Array.from<RegExpMatchArray>(
-      xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g),
-    );
-    contents.forEach(match => {
-      const content = match[1] || '';
-      const keyMatch = content.match(/<Key>([\s\S]*?)<\/Key>/);
-      if (!keyMatch?.[1]) { return; }
-      const lastModifiedMatch =
-        content.match(/<LastModified>([\s\S]*?)<\/LastModified>/);
-      const sizeMatch = content.match(/<Size>(\d+)<\/Size>/);
-      objects.push({
-        key: decodeXmlEntities(keyMatch[1]),
-        uploaded: lastModifiedMatch?.[1]
-          ? new Date(lastModifiedMatch[1])
-          : undefined,
-        size: sizeMatch?.[1] ? Number(sizeMatch[1]) : undefined,
-      });
-    });
-
-    const isTruncated = /<IsTruncated>true<\/IsTruncated>/.test(xml);
-    const nextTokenMatch =
-      xml.match(/<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/);
-    continuationToken = nextTokenMatch?.[1]
+  const query = new URLSearchParams({
+    'list-type': '2',
+    'max-keys': String(pageSize),
+  });
+  if (continuationToken) {
+    query.set('continuation-token', continuationToken);
+  }
+  const response = await r2Request(env, 'GET', '', { query });
+  const xml = await response.text();
+  const objects = Array.from<RegExpMatchArray>(
+    xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g),
+  ).flatMap(match => {
+    const content = match[1] || '';
+    const keyMatch = content.match(/<Key>([\s\S]*?)<\/Key>/);
+    if (!keyMatch?.[1]) { return []; }
+    const lastModifiedMatch =
+      content.match(/<LastModified>([\s\S]*?)<\/LastModified>/);
+    const sizeMatch = content.match(/<Size>(\d+)<\/Size>/);
+    return [{
+      key: decodeXmlEntities(keyMatch[1]),
+      uploaded: lastModifiedMatch?.[1]
+        ? new Date(lastModifiedMatch[1])
+        : undefined,
+      size: sizeMatch?.[1] ? Number(sizeMatch[1]) : undefined,
+    }];
+  });
+  const nextTokenMatch =
+    xml.match(/<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/);
+  return {
+    objects,
+    nextCursor: nextTokenMatch?.[1]
       ? decodeXmlEntities(nextTokenMatch[1])
-      : undefined;
-    if (!isTruncated || !continuationToken) {
-      break;
-    }
-  }
-
-  return objects;
+      : undefined,
+  };
 };
 
 const putObject = async (
@@ -1774,11 +1787,14 @@ const buildRegistrationKey = (
   return segments.join('/');
 };
 
-const getMediaRows = async (env: Env) => {
+const getMediaRowsForUrls = async (env: Env, urls: string[]) => {
+  const uniqueUrls = Array.from(new Set(urls.filter(Boolean)));
+  if (uniqueUrls.length === 0) { return [] as MediaRow[]; }
   const sql = sqlForEnv(env);
   return (await sql`
     SELECT id, url, extension, poster_url, preview_url, transcode_status
     FROM media
+    WHERE url = ANY(${uniqueUrls})
   `) as unknown as MediaRow[];
 };
 
@@ -2074,7 +2090,8 @@ const getPendingUploadRegistrationHints = async (env: Env) => {
     return (await sql`
       SELECT url, original_file_name, title, updated_at, created_at
       FROM upload_registration_hints
-      ORDER BY updated_at DESC
+      ORDER BY created_at ASC, url ASC
+      LIMIT 25
     `) as unknown as UploadRegistrationHintRow[];
   } catch (error) {
     console.warn('Pending upload registration hints unavailable; continuing without hints', error);
@@ -2184,6 +2201,16 @@ const ensureRegistrationStatusTable = async (env: Env) => {
           updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
           created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         )
+      `;
+      await sql`
+        CREATE INDEX IF NOT EXISTS worker_registration_status_fifo_idx
+        ON worker_registration_status (uploaded_at ASC NULLS LAST, created_at ASC, url ASC)
+        WHERE status='detected'
+      `;
+      await sql`
+        CREATE INDEX IF NOT EXISTS worker_registration_status_source_url_idx
+        ON worker_registration_status (source_url)
+        WHERE source_url IS NOT NULL
       `;
     })();
   }
@@ -2304,6 +2331,50 @@ type RegistrationStatusWrite = {
   mediaId?: string
   extension?: string
   errorMessage?: string
+};
+
+const getRegistrationStatusRowsForUrls = async (env: Env, urls: string[]) => {
+  const uniqueUrls = Array.from(new Set(urls.filter(Boolean)));
+  if (uniqueUrls.length === 0) { return [] as RegistrationStatusRow[]; }
+  await ensureRegistrationStatusTable(env);
+  const sql = sqlForEnv(env);
+  return (await sql`
+    SELECT
+      url,
+      file_name,
+      uploaded_at,
+      status,
+      source_url,
+      original_file_name,
+      title,
+      media_id,
+      extension,
+      error_message
+    FROM worker_registration_status
+    WHERE url = ANY(${uniqueUrls}) OR source_url = ANY(${uniqueUrls})
+  `) as unknown as RegistrationStatusRow[];
+};
+
+const getQueuedRegistrationStatusRows = async (env: Env, limit: number) => {
+  await ensureRegistrationStatusTable(env);
+  const sql = sqlForEnv(env);
+  return (await sql`
+    SELECT
+      url,
+      file_name,
+      uploaded_at,
+      status,
+      source_url,
+      original_file_name,
+      title,
+      media_id,
+      extension,
+      error_message
+    FROM worker_registration_status
+    WHERE status='detected'
+    ORDER BY uploaded_at ASC NULLS LAST, created_at ASC, url ASC
+    LIMIT ${Math.max(1, Math.min(limit, 100))}
+  `) as unknown as RegistrationStatusRow[];
 };
 
 type HlsArtifactMetadata = {
@@ -2626,13 +2697,23 @@ const ensureRegisteredUploadFileMapTable = async (env: Env) => {
   }
 };
 
-const getRegisteredUploadFileMapRows = async (env: Env) => {
+const getRegisteredUploadFileMapRowsForUrls = async (env: Env, urls: string[]) => {
+  const uniqueUrls = Array.from(new Set(urls.filter(Boolean)));
+  if (uniqueUrls.length === 0) {
+    return [] as Array<{
+      media_id: string
+      stored_url: string
+      source_url: string
+      updated_at: Date | string
+    }>;
+  }
   const sql = sqlForEnv(env);
   await ensureRegisteredUploadFileMapTable(env);
   return (await sql`
     SELECT media_id, stored_url, source_url, updated_at
     FROM registered_upload_file_map
     WHERE stored_url<>source_url
+      AND (stored_url = ANY(${uniqueUrls}) OR source_url = ANY(${uniqueUrls}))
   `) as unknown as Array<{
     media_id: string
     stored_url: string
@@ -2765,6 +2846,53 @@ const releaseScanLease = async (env: Env, leaseToken: string) => {
   `;
 };
 
+let storageScanCursorTableReady: Promise<void> | undefined;
+const ensureStorageScanCursorTable = async (env: Env) => {
+  if (!storageScanCursorTableReady) {
+    const sql = sqlForEnv(env);
+    storageScanCursorTableReady = sql`
+      CREATE TABLE IF NOT EXISTS worker_storage_scan_cursor (
+        cursor_name TEXT PRIMARY KEY,
+        continuation_token TEXT,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `.then(() => undefined);
+  }
+  try {
+    await storageScanCursorTableReady;
+  } catch (error) {
+    storageScanCursorTableReady = undefined;
+    throw error;
+  }
+};
+
+const getStorageScanCursor = async (env: Env) => {
+  await ensureStorageScanCursorTable(env);
+  const sql = sqlForEnv(env);
+  const rows = (await sql`
+    SELECT continuation_token
+    FROM worker_storage_scan_cursor
+    WHERE cursor_name='registration'
+  `) as unknown as Array<{ continuation_token?: string | null }>;
+  return trimToUndefined(rows[0]?.continuation_token);
+};
+
+const saveStorageScanCursor = async (
+  env: Env,
+  continuationToken?: string,
+) => {
+  await ensureStorageScanCursorTable(env);
+  const sql = sqlForEnv(env);
+  await sql`
+    INSERT INTO worker_storage_scan_cursor (
+      cursor_name, continuation_token, updated_at
+    ) VALUES ('registration', ${continuationToken ?? null}, now())
+    ON CONFLICT (cursor_name) DO UPDATE SET
+      continuation_token=EXCLUDED.continuation_token,
+      updated_at=now()
+  `;
+};
+
 const upsertMediaRow = async (
   env: Env,
   {
@@ -2869,6 +2997,8 @@ const scanAndRegisterWithLease = async (
   let missingProcessingSources = 0;
   let passes = 0;
   const attemptedRegistrationKeys = new Set<string>();
+  const storageScanCursor = await getStorageScanCursor(env);
+  let listedPageForScan: StorageListPage | undefined;
 
   for (let pass = 0; pass < maxRegisterPasses; pass += 1) {
     // Do not fan out direct Postgres connections here.  A large backlog used
@@ -2876,17 +3006,31 @@ const scanAndRegisterWithLease = async (
     // can terminate the scan before any item reaches `registering`.
     // Storage listing can overlap the first query, but database work remains
     // deliberately serial and bounded regardless of backlog size.
-    const listedObjectsPromise = listAllObjects(env);
-    const rows = await getMediaRows(env);
-    const hintRows = await getPendingUploadRegistrationHints(env);
-    const registrationRows = await getRegistrationStatusRows(env);
-    const registeredFileMaps = await getRegisteredUploadFileMapRows(env);
+    const listedPage = listedPageForScan ?? await listStorageObjectPage(
+      env,
+      storageScanCursor,
+    );
+    listedPageForScan = listedPage;
     const queuedDeletionPrefixes = await getQueuedDeletionPrefixes(env);
-    const listedObjects = await listedObjectsPromise;
+    const listedObjects = listedPage.objects;
     const objects = listedObjects.filter(object =>
       !Array.from(queuedDeletionPrefixes).some(prefix =>
         deletionKeyMatchesPrefix(object.key, prefix)));
     const objectsByKey = new Map(objects.map(object => [object.key, object]));
+    const hintRows = await getPendingUploadRegistrationHints(env);
+    const candidateUrls = Array.from(new Set([
+      ...objects.map(object => urlForKey(env, object.key)),
+      ...hintRows.map(hint => hint.url),
+    ]));
+    let rows = await getMediaRowsForUrls(env, candidateUrls);
+    const registrationRows = await getRegistrationStatusRowsForUrls(
+      env,
+      candidateUrls,
+    );
+    const registeredFileMaps = await getRegisteredUploadFileMapRowsForUrls(
+      env,
+      candidateUrls,
+    );
     if (pass === 0) {
       missingProcessingSources = await reconcileMissingProcessingSources(
         env,
@@ -3102,18 +3246,93 @@ const scanAndRegisterWithLease = async (
     const pendingUploads = Array.from(pendingObjectByKey.values());
 
     await syncDetectedStatuses(env, pendingUploads, registrationRowsByUrl);
+    // Discovery pages are intentionally small, but registration must be FIFO
+    // across every page already discovered. Pull only a small oldest-first
+    // window from the durable queue; never rebuild it from the whole bucket.
+    const queuedRegistrationRows = await getQueuedRegistrationStatusRows(
+      env,
+      Math.max(registerBatchSize * maxRegisterPasses, 25),
+    );
+    const queuedSourceUrls = queuedRegistrationRows
+      .map(row => trimToUndefined(row.source_url) || trimToUndefined(row.url))
+      .filter((url): url is string => Boolean(url));
+    const queuedMediaRows = await getMediaRowsForUrls(env, queuedSourceUrls);
+    rows = Array.from(new Map([
+      ...rows,
+      ...queuedMediaRows,
+    ].map(row => [row.id, row])).values());
+    queuedMediaRows.forEach(row => {
+      knownUrls.add(row.url);
+      if (row.poster_url) { knownUrls.add(row.poster_url); }
+      if (row.preview_url) { knownUrls.add(row.preview_url); }
+    });
+    queuedRegistrationRows.forEach(row => {
+      registrationRowsByUrl.set(row.url, row);
+      const sourceUrl = trimToUndefined(row.source_url);
+      if (sourceUrl) { registrationRowsByUrl.set(sourceUrl, row); }
+      const queuedUrl = sourceUrl || row.url;
+      const queuedKey = keyFromStorageUrl(env, queuedUrl);
+      const { fileNameBase, extension } = getFileParts(queuedKey);
+      if (
+        queuedKey &&
+        MEDIA_EXTENSIONS.has(extension) &&
+        !GENERATED_MEDIA_SUFFIX_REGEX.test(fileNameBase) &&
+        !knownUrls.has(queuedUrl)
+      ) {
+        pendingObjectByKey.set(queuedKey, {
+          key: queuedKey,
+          uploaded: parseDateValue(row.uploaded_at),
+          size: objectsByKey.get(queuedKey)?.size,
+        });
+      }
+    });
+    // Advance only after the page is durably represented in the registration
+    // queue. A crash before this point repeats a harmless upsert; a crash
+    // after it cannot silently lose discovered objects.
+    if (pass === 0) {
+      await saveStorageScanCursor(env, listedPage.nextCursor);
+    }
     registrationRemaining = pendingUploads.length;
     passes += 1;
-    if (pendingUploads.length === 0) { break; }
+    const queuedUploads = Array.from(pendingObjectByKey.values());
+    registrationRemaining = queuedUploads.length;
+    if (queuedUploads.length === 0) { break; }
 
-    const batch = selectOldestRegistrationBatch(
-      pendingUploads,
+    const selectedBatch = selectOldestRegistrationBatch(
+      queuedUploads,
       attemptedRegistrationKeys,
       registerBatchSize,
     );
-    if (batch.length === 0) {
-      registrationRemaining = pendingUploads.length;
+    if (selectedBatch.length === 0) {
+      registrationRemaining = queuedUploads.length;
       break;
+    }
+    const batch: R2ObjectLike[] = [];
+    for (const object of selectedBatch) {
+      if (!objectsByKey.has(object.key)) {
+        if (!await storageObjectExists(env, object.key)) {
+          const sourceUrl = urlForKey(env, object.key);
+          await setRegistrationStatus(env, {
+            url: sourceUrl,
+            status: 'error',
+            sourceUrl,
+            errorMessage: `${MISSING_UPLOAD_ERROR_PREFIX}; re-upload the file`,
+          });
+          attemptedRegistrationKeys.add(object.key);
+          continue;
+        }
+        // Queue rows outlive their discovery page. Refresh only the selected
+        // source object rather than re-listing the bucket to recover its size.
+        object.size = await storageObjectSize(env, object.key);
+      }
+      batch.push(object);
+    }
+    if (batch.length === 0) {
+      registrationRemaining = Math.max(
+        queuedUploads.length - selectedBatch.length,
+        0,
+      );
+      continue;
     }
     const batchHintUrls = batch.map(object => urlForKey(env, object.key));
     const hintsByUrl = await getUploadRegistrationHints(env, batchHintUrls);
@@ -3414,7 +3633,7 @@ const scanAndRegisterWithLease = async (
       }
     }
 
-    registrationRemaining = Math.max(pendingUploads.length - batch.length, 0);
+    registrationRemaining = Math.max(queuedUploads.length - batch.length, 0);
     if (batch.length === 0) { break; }
   }
 

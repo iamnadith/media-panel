@@ -120,10 +120,25 @@ test('a registration scan does not fan out direct database connections for a bac
   const scanEnd = workerSource.indexOf('const scanAndRegister =', scanStart);
   const source = workerSource.slice(scanStart, scanEnd);
 
-  assert.match(source, /const listedObjectsPromise = listAllObjects\(env\)/);
-  assert.match(source, /const rows = await getMediaRows\(env\)/);
+  assert.match(source, /const storageScanCursor = await getStorageScanCursor\(env\)/);
+  assert.match(source, /listedPageForScan \?\? await listStorageObjectPage/);
+  assert.match(source, /await saveStorageScanCursor\(env, listedPage\.nextCursor\)/);
+  assert.match(source, /getMediaRowsForUrls\(env, candidateUrls\)/);
+  assert.match(source, /getRegistrationStatusRowsForUrls/);
+  assert.match(source, /getRegisteredUploadFileMapRowsForUrls/);
   assert.match(source, /const queuedDeletionPrefixes = await getQueuedDeletionPrefixes\(env\)/);
-  assert.doesNotMatch(source, /Promise\.all\(\[\s*listAllObjects\(env\)/);
+  assert.doesNotMatch(source, /Promise\.all\(\[\s*listStorageObjectPage\(env\)/);
+});
+
+test('registration consumes the durable queue FIFO across inventory pages', () => {
+  const scanStart = workerSource.indexOf('const scanAndRegisterWithLease');
+  const scanEnd = workerSource.indexOf('const scanAndRegister =', scanStart);
+  const source = workerSource.slice(scanStart, scanEnd);
+
+  assert.match(source, /getQueuedRegistrationStatusRows/);
+  assert.match(source, /queuedUploads/);
+  assert.match(source, /selectOldestRegistrationBatch\(\s*queuedUploads/);
+  assert.match(workerSource, /WHERE status='detected'[\s\S]*?ORDER BY uploaded_at ASC NULLS LAST, created_at ASC, url ASC/);
 });
 
 test('registration status and logs expose file-level queue progress', () => {
@@ -141,7 +156,7 @@ test('Drive registration I/O is deadline-bound so a scan lease cannot stick fore
   assert.match(workerSource, /DRIVE_RETRY_TARGET_VISIBILITY_ATTEMPTS = 3/);
   assert.match(workerSource, /DRIVE_COPY_VISIBILITY_DELAY_MS = 2000/);
 
-  const listStart = workerSource.indexOf('const listAllObjects');
+  const listStart = workerSource.indexOf('const listStorageObjectPage');
   const listEnd = workerSource.indexOf('const putObject', listStart);
   assert.match(
     workerSource.slice(listStart, listEnd),
