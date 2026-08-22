@@ -63,6 +63,9 @@ type UploadRegistrationHintRow = {
 export interface Env {
   POSTGRES_URL: string
   DISABLE_POSTGRES_SSL?: string
+  // Optional Cloudflare Hyperdrive binding. When present it owns the database
+  // connection pool, avoiding a fresh public Supabase TCP handshake per event.
+  HYPERDRIVE?: { connectionString: string }
   MEDIA_PANEL_BASE_URL?: string
   AUTOMATION_API_SECRET?: string
   R2_PUBLIC_BASE_URL: string
@@ -932,8 +935,44 @@ const isSupabasePostgresUrl = (value: string) => {
   }
 };
 
+const hyperdriveSqlForEnv = (env: Env): SqlQuery => {
+  const connectionString = env.HYPERDRIVE?.connectionString;
+  if (!connectionString) {
+    throw new Error('Hyperdrive binding is unavailable');
+  }
+  const sql = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    let text = strings[0] || '';
+    for (let index = 1; index < strings.length; index += 1) {
+      text += `$${index}${strings[index] || ''}`;
+    }
+    // Hyperdrive maintains the upstream pool. A new client for this Worker
+    // event is therefore cheap, bounded, and safe for isolate reclamation.
+    const client = new Client({
+      connectionString,
+      connectionTimeoutMillis: SUPABASE_CONNECT_TIMEOUT_MS,
+      query_timeout: SUPABASE_QUERY_TIMEOUT_MS,
+      statement_timeout: SUPABASE_QUERY_TIMEOUT_MS,
+    });
+    try {
+      await client.connect();
+      const result = await client.query({
+        text,
+        values,
+        query_timeout: SUPABASE_QUERY_TIMEOUT_MS,
+        statement_timeout: SUPABASE_QUERY_TIMEOUT_MS,
+      });
+      return result.rows;
+    } finally {
+      await client.end().catch(() => undefined);
+    }
+  };
+  return sql as SqlQuery;
+};
+
 const sqlForEnv = (env: Env) =>
-  isSupabasePostgresUrl(env.POSTGRES_URL)
+  env.HYPERDRIVE?.connectionString
+    ? hyperdriveSqlForEnv(env)
+    : isSupabasePostgresUrl(env.POSTGRES_URL)
     ? supabaseSqlForEnv(env)
     : neon(env.POSTGRES_URL);
 

@@ -255,6 +255,13 @@ test('Supabase scans use a fresh bounded client and retry a dropped connection',
   assert.doesNotMatch(workerSource, /new Pool\(/);
 });
 
+test('Hyperdrive takes precedence when its Worker binding is configured', () => {
+  assert.match(workerSource, /HYPERDRIVE\?: \{ connectionString: string \}/);
+  assert.match(workerSource, /const hyperdriveSqlForEnv = \(env: Env\)/);
+  assert.match(workerSource, /env\.HYPERDRIVE\?\.connectionString\n    \? hyperdriveSqlForEnv\(env\)/);
+  assert.match(workerSource, /Hyperdrive maintains the upstream pool/);
+});
+
 test('optional upload hints cannot abort a registration scan', () => {
   assert.match(workerSource, /lookupUrls\.length; offset \+= 200/);
   assert.match(workerSource, /Upload registration hints unavailable; continuing without hints/);
