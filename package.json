@@ -95,7 +95,8 @@
     "postcss": "8.5.6",
     "tailwindcss": "4.1.16",
     "ts-node": "^10.9.2",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "wrangler": "4.88.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

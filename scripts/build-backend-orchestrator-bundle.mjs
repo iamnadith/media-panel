@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const workerDirectory = join(root, 'workers', 'backend-orchestrator');
 const workerWrangler = join(
-  workerDirectory,
+  root,
   'node_modules',
   '.bin',
   process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler',
@@ -25,10 +25,10 @@ await rm(outputDirectory, { recursive: true, force: true });
 await new Promise((resolve, reject) => {
   const windows = process.platform === 'win32';
   const child = spawn(
-    windows ? process.env.ComSpec || 'cmd.exe' : 'npx',
+    windows ? process.env.ComSpec || 'cmd.exe' : workerWrangler,
     windows
       ? ['/d', '/c', `call "${workerWrangler}" deploy --dry-run --outdir "${outputDirectory}"`]
-      : [workerWrangler, 'deploy', '--dry-run', '--outdir', outputDirectory],
+      : ['deploy', '--dry-run', '--outdir', outputDirectory],
     { cwd: workerDirectory, stdio: 'inherit', windowsVerbatimArguments: windows },
   );
   child.once('error', reject);
