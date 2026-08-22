@@ -206,6 +206,12 @@ test('Supabase scans use a fresh bounded client and retry a dropped connection',
   assert.doesNotMatch(workerSource, /new Pool\(/);
 });
 
+test('optional upload hints cannot abort a registration scan', () => {
+  assert.match(workerSource, /lookupUrls\.length; offset \+= 200/);
+  assert.match(workerSource, /Upload registration hints unavailable; continuing without hints/);
+  assert.match(workerSource, /Upload registration hint chunk unavailable; continuing without it/);
+});
+
 test('a deletion queue drain cannot block the scheduled registration scan', () => {
   const scheduledStart = workerSource.indexOf('async scheduled(');
   const scheduledEnd = workerSource.indexOf('async fetch(', scheduledStart);

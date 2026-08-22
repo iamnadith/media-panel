@@ -226,7 +226,7 @@ const GENERATED_MEDIA_SUFFIX_REGEX =
 const STALE_REGISTRATION_ERROR_MESSAGE =
   'Previous registration attempt stalled; queued for retry';
 const MISSING_UPLOAD_ERROR_PREFIX = 'Upload not found in storage';
-const WORKER_BUILD_ID = 'registration-retry-v37-lease';
+const WORKER_BUILD_ID = 'registration-retry-v37-hints';
 // A scheduled Worker must finish promptly. Drive copies can become visible
 // asynchronously, so persist the in-flight state and check again on the next
 // minute instead of polling long enough to lose the registration lease.
@@ -1998,8 +1998,13 @@ const getUploadRegistrationHints = async (env: Env, urls: string[]) => {
   if (urls.length === 0) {
     return new Map<string, UploadRegistrationHintRow>();
   }
-  await ensureUploadRegistrationHintsTable(env);
-  await ensureUploadRegistrationHintsColumnTypes(env);
+  try {
+    await ensureUploadRegistrationHintsTable(env);
+    await ensureUploadRegistrationHintsColumnTypes(env);
+  } catch (error) {
+    console.warn('Upload registration hints unavailable; continuing without hints', error);
+    return new Map<string, UploadRegistrationHintRow>();
+  }
   const sql = sqlForEnv(env);
   const requestedUrls = new Map(urls.map(url => [url, {
     canonical: canonicalizeStorageUrl(url),
@@ -2011,11 +2016,25 @@ const getUploadRegistrationHints = async (env: Env, urls: string[]) => {
       decoded,
     ]),
   ));
-  const rows = (await sql`
-    SELECT url, original_file_name, title
-    FROM upload_registration_hints
-    WHERE url = ANY(${lookupUrls})
-  `) as unknown as UploadRegistrationHintRow[];
+  const rows: UploadRegistrationHintRow[] = [];
+  // Keep optional metadata lookups small. A large ANY(array) query can be
+  // dropped by a Supabase pooler; losing hints must never stop registration.
+  for (let offset = 0; offset < lookupUrls.length; offset += 200) {
+    const chunk = lookupUrls.slice(offset, offset + 200);
+    try {
+      const chunkRows = (await sql`
+        SELECT url, original_file_name, title
+        FROM upload_registration_hints
+        WHERE url = ANY(${chunk})
+      `) as unknown as UploadRegistrationHintRow[];
+      rows.push(...chunkRows);
+    } catch (error) {
+      console.warn('Upload registration hint chunk unavailable; continuing without it', {
+        offset,
+        error,
+      });
+    }
+  }
   const rowsByUrl = new Map(rows.map(row => [row.url, row]));
   const rowsByCanonicalUrl = new Map(
     rows.map(row => [canonicalizeStorageUrl(row.url), row]),
@@ -2042,14 +2061,19 @@ const getUploadRegistrationHints = async (env: Env, urls: string[]) => {
 };
 
 const getPendingUploadRegistrationHints = async (env: Env) => {
-  await ensureUploadRegistrationHintsTable(env);
-  await ensureUploadRegistrationHintsColumnTypes(env);
-  const sql = sqlForEnv(env);
-  return (await sql`
-    SELECT url, original_file_name, title, updated_at, created_at
-    FROM upload_registration_hints
-    ORDER BY updated_at DESC
-  `) as unknown as UploadRegistrationHintRow[];
+  try {
+    await ensureUploadRegistrationHintsTable(env);
+    await ensureUploadRegistrationHintsColumnTypes(env);
+    const sql = sqlForEnv(env);
+    return (await sql`
+      SELECT url, original_file_name, title, updated_at, created_at
+      FROM upload_registration_hints
+      ORDER BY updated_at DESC
+    `) as unknown as UploadRegistrationHintRow[];
+  } catch (error) {
+    console.warn('Pending upload registration hints unavailable; continuing without hints', error);
+    return [];
+  }
 };
 
 const replaceUploadRegistrationHintUrl = async (
