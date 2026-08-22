@@ -88,7 +88,7 @@ export const provisionCloudflareWorkerIntegration = async ({ token, accountId }:
   let subdomain: string | undefined;
   try { subdomain = (await cf(token, `/accounts/${account}/workers/subdomain`)).subdomain; } catch { subdomain = `media-panel-${slug(account).slice(-8)}`; await cfJson(token, `/accounts/${account}/workers/subdomain`, { subdomain }, 'PUT'); }
   const secret = randomBytes(32).toString('base64url'); const bindings = await workerSecrets(secret); bindings.push({ name: 'HYPERDRIVE', type: 'hyperdrive', id: hyperdrive.id } as any);
-  const form = new FormData(); form.set('metadata', JSON.stringify({ main_module: 'index.js', compatibility_date: '2026-05-05', compatibility_flags: ['nodejs_compat'], bindings })); form.set('index.js', new Blob([BACKEND_ORCHESTRATOR_BUNDLE], { type: 'application/javascript' }), 'index.js');
+  const form = new FormData(); form.set('metadata', new Blob([JSON.stringify({ main_module: 'index.js', compatibility_date: '2026-05-05', compatibility_flags: ['nodejs_compat'], bindings })], { type: 'application/json' }), 'metadata'); form.set('index.js', new Blob([BACKEND_ORCHESTRATOR_BUNDLE], { type: 'application/javascript+module' }), 'index.js');
   await cf(token, `/accounts/${account}/workers/scripts/${workerName}`, { method: 'PUT', body: form });
   await cfJson(token, `/accounts/${account}/workers/scripts/${workerName}/subdomain`, { enabled: true, previews_enabled: false });
   await cfJson(token, `/accounts/${account}/workers/scripts/${workerName}/triggers`, { schedules: [{ cron: '* * * * *' }] }, 'PUT');
