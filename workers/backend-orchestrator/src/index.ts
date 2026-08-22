@@ -228,7 +228,7 @@ const GENERATED_MEDIA_SUFFIX_REGEX =
 const STALE_REGISTRATION_ERROR_MESSAGE =
   'Previous registration attempt stalled; queued for retry';
 const MISSING_UPLOAD_ERROR_PREFIX = 'Upload not found in storage';
-const WORKER_BUILD_ID = 'registration-queue-v40';
+const WORKER_BUILD_ID = 'registration-queue-v41';
 // A scheduled Worker must finish promptly. Drive copies can become visible
 // asynchronously, so persist the in-flight state and check again on the next
 // minute instead of polling long enough to lose the registration lease.
@@ -4298,37 +4298,34 @@ const heartbeatProcessor = async (
 
 const status = async (env: Env) => {
   const sql = sqlForEnv(env);
-  const [
-    rows,
-    processors,
-    activeJobs,
-    deletionQueue,
-    registrationSnapshotRows,
-  ] = await Promise.all([
-    sql`
+  // The Supabase adapter intentionally opens a fresh short-lived connection
+  // for each statement. Do not turn an admin status refresh into five
+  // simultaneous pooler connections: under Free-tier pressure that can make
+  // the status endpoint itself time out and starve registration work.
+  const rows = await sql`
       SELECT transcode_status, COUNT(*)::int AS count
       FROM media
       WHERE transcode_status IN ('pending', 'processing', 'failed')
       GROUP BY transcode_status
-    ` as unknown as Promise<Array<{
+    ` as unknown as Array<{
       transcode_status: string | null
       count: number
-    }>>,
-    sql`
+    }>;
+  const processors = await sql`
       SELECT processor_id, platform, state, last_seen_at, started_at
       FROM video_processor_presence
       WHERE last_seen_at > now() - interval '2 minutes'
       ORDER BY last_seen_at DESC
-    `.catch(() => []) as Promise<Record<string, unknown>[]>,
-    sql`
+    `.catch(() => []) as Record<string, unknown>[];
+  const activeJobs = await sql`
       SELECT id, title, transcode_status, transcode_error, updated_at
       FROM media
       WHERE transcode_status IN ('pending', 'processing', 'failed')
       ORDER BY updated_at DESC
       LIMIT 20
-    ` as unknown as Promise<Record<string, unknown>[]>,
-    getDeletionQueueCounts(env),
-    sql`
+    ` as unknown as Record<string, unknown>[];
+  const deletionQueue = await getDeletionQueueCounts(env);
+  const registrationSnapshotRows = await sql`
       SELECT
         (COUNT(*) FILTER (WHERE status='detected'))::int AS detected,
         (COUNT(*) FILTER (WHERE status='registering'))::int AS registering,
@@ -4359,14 +4356,13 @@ const status = async (env: Env) => {
         ), '[]'::jsonb) AS jobs
       FROM worker_registration_status
       WHERE status IN ('detected', 'registering', 'error')
-    ` as unknown as Promise<Array<{
+    ` as unknown as Array<{
       detected: number
       registering: number
       error: number
       total: number
       jobs: Record<string, unknown>[]
-    }>>,
-  ]);
+    }>;
   const counts = rows.reduce<Record<string, number>>((acc, row) => {
     acc[row.transcode_status || 'unknown'] = row.count;
     return acc;

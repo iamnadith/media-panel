@@ -141,6 +141,16 @@ test('registration consumes the durable queue FIFO across inventory pages', () =
   assert.match(workerSource, /WHERE status='detected'[\s\S]*?ORDER BY uploaded_at ASC NULLS LAST, created_at ASC, url ASC/);
 });
 
+test('status polling does not fan out database connections', () => {
+  const statusStart = workerSource.indexOf('const status = async');
+  const statusEnd = workerSource.indexOf('let scanInFlight', statusStart);
+  const source = workerSource.slice(statusStart, statusEnd);
+
+  assert.doesNotMatch(source, /Promise\.all/);
+  assert.match(source, /await getDeletionQueueCounts\(env\)/);
+  assert.match(source, /Supabase adapter intentionally opens a fresh short-lived connection/);
+});
+
 test('registration status and logs expose file-level queue progress', () => {
   assert.match(workerSource, /registrationQueue:/);
   assert.match(workerSource, /registrationJobs:/);
