@@ -147,8 +147,9 @@ test('status polling does not fan out database connections', () => {
   const source = workerSource.slice(statusStart, statusEnd);
 
   assert.doesNotMatch(source, /Promise\.all/);
-  assert.match(source, /await getDeletionQueueCounts\(env\)/);
-  assert.match(source, /Supabase adapter intentionally opens a fresh short-lived connection/);
+  assert.doesNotMatch(source, /getDeletionQueueCounts\(env\)/);
+  assert.match(source, /Keep the[\s\S]*admin snapshot to one session/);
+  assert.match(source, /COALESCE\(\([\s\S]*?registration_snapshot/);
 });
 
 test('registration status and logs expose file-level queue progress', () => {

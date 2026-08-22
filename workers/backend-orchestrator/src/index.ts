@@ -228,7 +228,7 @@ const GENERATED_MEDIA_SUFFIX_REGEX =
 const STALE_REGISTRATION_ERROR_MESSAGE =
   'Previous registration attempt stalled; queued for retry';
 const MISSING_UPLOAD_ERROR_PREFIX = 'Upload not found in storage';
-const WORKER_BUILD_ID = 'registration-queue-v41';
+const WORKER_BUILD_ID = 'registration-queue-v42';
 // A scheduled Worker must finish promptly. Drive copies can become visible
 // asynchronously, so persist the in-flight state and check again on the next
 // minute instead of polling long enough to lose the registration lease.
@@ -4298,87 +4298,80 @@ const heartbeatProcessor = async (
 
 const status = async (env: Env) => {
   const sql = sqlForEnv(env);
-  // The Supabase adapter intentionally opens a fresh short-lived connection
-  // for each statement. Do not turn an admin status refresh into five
-  // simultaneous pooler connections: under Free-tier pressure that can make
-  // the status endpoint itself time out and starve registration work.
-  const rows = await sql`
-      SELECT transcode_status, COUNT(*)::int AS count
-      FROM media
-      WHERE transcode_status IN ('pending', 'processing', 'failed')
-      GROUP BY transcode_status
-    ` as unknown as Array<{
-      transcode_status: string | null
-      count: number
-    }>;
-  const processors = await sql`
-      SELECT processor_id, platform, state, last_seen_at, started_at
-      FROM video_processor_presence
-      WHERE last_seen_at > now() - interval '2 minutes'
-      ORDER BY last_seen_at DESC
-    `.catch(() => []) as Record<string, unknown>[];
-  const activeJobs = await sql`
-      SELECT id, title, transcode_status, transcode_error, updated_at
-      FROM media
-      WHERE transcode_status IN ('pending', 'processing', 'failed')
-      ORDER BY updated_at DESC
-      LIMIT 20
-    ` as unknown as Record<string, unknown>[];
-  const deletionQueue = await getDeletionQueueCounts(env);
-  const registrationSnapshotRows = await sql`
-      SELECT
-        (COUNT(*) FILTER (WHERE status='detected'))::int AS detected,
-        (COUNT(*) FILTER (WHERE status='registering'))::int AS registering,
-        (COUNT(*) FILTER (WHERE status='error'))::int AS error,
-        COUNT(*)::int AS total,
-        COALESCE((
-          SELECT jsonb_agg(
-            to_jsonb(job)
-            ORDER BY job.uploaded_at ASC NULLS LAST, job.updated_at ASC, job.url ASC
-          )
-          FROM (
-            SELECT
-              url,
-              file_name,
-              original_file_name,
-              title,
-              status,
-              media_id,
-              extension,
-              error_message,
-              uploaded_at,
-              updated_at
-            FROM worker_registration_status
-            WHERE status IN ('detected', 'registering', 'error')
-            ORDER BY uploaded_at ASC NULLS LAST, updated_at ASC, url ASC
-            LIMIT 50
-          ) job
-        ), '[]'::jsonb) AS jobs
-      FROM worker_registration_status
-      WHERE status IN ('detected', 'registering', 'error')
-    ` as unknown as Array<{
-      detected: number
-      registering: number
-      error: number
-      total: number
-      jobs: Record<string, unknown>[]
-    }>;
-  const counts = rows.reduce<Record<string, number>>((acc, row) => {
-    acc[row.transcode_status || 'unknown'] = row.count;
-    return acc;
-  }, {});
-  const registrationSnapshot = registrationSnapshotRows[0] || {
-    detected: 0,
-    registering: 0,
-    error: 0,
-    total: 0,
-    jobs: [],
+  // The Worker intentionally does not retain database sockets. Keep the
+  // admin snapshot to one session too: serial individual queries still spend
+  // most of the request budget repeating pooler TLS handshakes.
+  const snapshotRows = await sql`
+    SELECT
+      COALESCE((
+        SELECT jsonb_object_agg(status_count.transcode_status, status_count.count)
+        FROM (
+          SELECT transcode_status, COUNT(*)::int AS count
+          FROM media
+          WHERE transcode_status IN ('pending', 'processing', 'failed')
+          GROUP BY transcode_status
+        ) status_count
+      ), '{}'::jsonb) AS counts,
+      COALESCE((
+        SELECT jsonb_agg(to_jsonb(job) ORDER BY job.updated_at DESC)
+        FROM (
+          SELECT id, title, transcode_status, transcode_error, updated_at
+          FROM media
+          WHERE transcode_status IN ('pending', 'processing', 'failed')
+          ORDER BY updated_at DESC
+          LIMIT 20
+        ) job
+      ), '[]'::jsonb) AS active_jobs,
+      COALESCE((
+        SELECT jsonb_build_object(
+          'detected', (COUNT(*) FILTER (WHERE status='detected'))::int,
+          'registering', (COUNT(*) FILTER (WHERE status='registering'))::int,
+          'error', (COUNT(*) FILTER (WHERE status='error'))::int,
+          'total', COUNT(*)::int,
+          'jobs', COALESCE((
+            SELECT jsonb_agg(
+              to_jsonb(job)
+              ORDER BY job.uploaded_at ASC NULLS LAST, job.updated_at ASC, job.url ASC
+            )
+            FROM (
+              SELECT
+                url, file_name, original_file_name, title, status, media_id,
+                extension, error_message, uploaded_at, updated_at
+              FROM worker_registration_status
+              WHERE status IN ('detected', 'registering', 'error')
+              ORDER BY uploaded_at ASC NULLS LAST, updated_at ASC, url ASC
+              LIMIT 50
+            ) job
+          ), '[]'::jsonb)
+        )
+        FROM worker_registration_status
+        WHERE status IN ('detected', 'registering', 'error')
+      ), jsonb_build_object(
+        'detected', 0, 'registering', 0, 'error', 0, 'total', 0, 'jobs', '[]'::jsonb
+      )) AS registration_snapshot
+  ` as unknown as Array<{
+    counts?: Record<string, number>
+    active_jobs?: Record<string, unknown>[]
+    registration_snapshot?: {
+      detected?: number
+      registering?: number
+      error?: number
+      total?: number
+      jobs?: Record<string, unknown>[]
+    }
+  }>;
+  const snapshot = snapshotRows[0] || {};
+  const counts = snapshot.counts || {};
+  const registrationSnapshot = snapshot.registration_snapshot || {
+    detected: 0, registering: 0, error: 0, total: 0, jobs: [],
   };
   return {
     ...counts,
-    processors,
-    activeJobs,
-    deletionQueue,
+    // These are intentionally omitted from the critical snapshot query. They
+    // are operational extras and must never make queue visibility unavailable.
+    processors: [],
+    activeJobs: snapshot.active_jobs || [],
+    deletionQueue: {},
     registrationQueue: {
       detected: registrationSnapshot.detected,
       registering: registrationSnapshot.registering,
