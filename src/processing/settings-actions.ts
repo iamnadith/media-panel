@@ -40,16 +40,29 @@ export const saveProcessingSettingsAction = async (
 export const deployCloudflareWorkerAction = async (
   _state: ProcessingSettingsActionState,
   formData: FormData,
-): Promise<ProcessingSettingsActionState> =>
-  runAuthenticatedAdminServerAction(async () => {
-    try {
-      await provisionCloudflareWorkerIntegration({
-        token: String(formData.get('cloudflareApiToken') || ''),
-        accountId: String(formData.get('cloudflareAccountId') || '') || undefined,
-      });
-      revalidatePath(PATH_ADMIN_CONFIGURATION);
-      return { saved: true };
-    } catch (error) {
-      return { error: error instanceof Error ? error.message : 'Worker deployment failed' };
-    }
-  }, 'manage-configuration');
+): Promise<ProcessingSettingsActionState> => {
+  try {
+    return await runAuthenticatedAdminServerAction(async () => {
+      try {
+        await provisionCloudflareWorkerIntegration({
+          token: String(formData.get('cloudflareApiToken') || ''),
+          accountId: String(formData.get('cloudflareAccountId') || '') || undefined,
+        });
+        revalidatePath(PATH_ADMIN_CONFIGURATION);
+        return { saved: true };
+      } catch (error) {
+        return {
+          error: error instanceof Error
+            ? error.message
+            : 'Worker deployment failed',
+        };
+      }
+    }, 'manage-configuration');
+  } catch (error) {
+    return {
+      error: error instanceof Error
+        ? error.message
+        : 'Unable to authenticate this configuration request',
+    };
+  }
+};

@@ -77,7 +77,7 @@ export const provisionCloudflareWorkerIntegration = async ({ token, accountId }:
   if (!token.trim()) throw new Error('Cloudflare API token is required'); await table();
   try { await cf(token, '/user/tokens/verify'); } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown Cloudflare API error';
-    throw new Error(`Cloudflare rejected this API token: ${message}. Create an API token with Workers Scripts Write and Hyperdrive Write.`);
+    throw new Error(`Cloudflare rejected this API token: ${message}. Create an API token with Workers Scripts Edit and Hyperdrive Edit.`);
   }
   const accounts = accountId?.trim() ? [{ id: accountId.trim() }] : await cf(token, '/accounts?per_page=50');
   if (!Array.isArray(accounts) || accounts.length !== 1) throw new Error('Cloudflare account ID is needed only when the token can access more than one account');
