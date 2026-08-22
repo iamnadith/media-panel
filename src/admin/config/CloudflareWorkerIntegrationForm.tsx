@@ -12,7 +12,7 @@ export default function CloudflareWorkerIntegrationForm({ status }: { status: Cl
   return <form action={action} className="space-y-3">
     <div>
       <div className="font-bold text-main">Cloudflare Worker</div>
-      <p className="text-sm text-dim">The panel uploads this release&apos;s orchestrator code, creates Hyperdrive, generates the private key, enables the workers.dev URL, and creates the one-minute schedule.</p>
+      <p className="text-sm text-dim">The panel uploads this release&apos;s orchestrator code, creates Hyperdrive, generates the private key, enables the workers.dev URL, and creates the one-minute schedule. The token needs Workers Scripts Write and Hyperdrive Write.</p>
     </div>
     {status.configured && <div className="rounded-md bg-dim px-3 py-2 text-sm text-main">Deployed: {status.workerUrl}<br />Hyperdrive: {status.hyperdriveId}</div>}
     <label className="block text-sm font-medium text-main">Cloudflare API token<input required name="cloudflareApiToken" type="password" autoComplete="off" className="mt-1 w-full rounded-md border border-medium bg-main px-3 py-2 text-main" /></label>

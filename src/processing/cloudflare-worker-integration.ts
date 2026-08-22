@@ -54,10 +54,9 @@ const publicUrl = (input?: string) => input?.trim() ? (/^https?:\/\//i.test(inpu
 const getStored = async () => { await table(); return (await query<StoredIntegration>('SELECT * FROM cloudflare_worker_integration WHERE id=true')).rows[0]; };
 
 export const getBackendOrchestratorIntegration = async (): Promise<BackendOrchestratorIntegration | undefined> => {
-  const row = await getStored().catch(() => undefined);
+  const row = await getStored();
   if (row?.worker_url && row.secret_ciphertext && row.secret_iv && row.secret_tag) return { baseUrl: row.worker_url, sharedSecret: decrypt(row.secret_ciphertext, row.secret_iv, row.secret_tag) };
-  const baseUrl = process.env.BACKEND_ORCHESTRATOR_BASE_URL?.trim(); const sharedSecret = process.env.BACKEND_ORCHESTRATOR_SHARED_SECRET?.trim();
-  return baseUrl && sharedSecret ? { baseUrl, sharedSecret } : undefined;
+  return undefined;
 };
 export const getCloudflareWorkerIntegrationStatus = async (): Promise<CloudflareWorkerIntegrationStatus> => {
   const row = await getStored(); return row ? { configured: true, accountId: row.account_id, workerName: row.worker_name, workerUrl: row.worker_url, hyperdriveId: row.hyperdrive_id } : { configured: false };
@@ -76,6 +75,10 @@ const workerSecrets = async (secret: string) => {
 
 export const provisionCloudflareWorkerIntegration = async ({ token, accountId }: { token: string; accountId?: string }) => {
   if (!token.trim()) throw new Error('Cloudflare API token is required'); await table();
+  try { await cf(token, '/user/tokens/verify'); } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown Cloudflare API error';
+    throw new Error(`Cloudflare rejected this API token: ${message}. Create an API token with Workers Scripts Write and Hyperdrive Write.`);
+  }
   const accounts = accountId?.trim() ? [{ id: accountId.trim() }] : await cf(token, '/accounts?per_page=50');
   if (!Array.isArray(accounts) || accounts.length !== 1) throw new Error('Cloudflare account ID is needed only when the token can access more than one account');
   const account = accounts[0].id as string; const stored = await getStored(); const workerName = stored?.worker_name || `media-panel-orchestrator-${slug(account).slice(-8)}`;

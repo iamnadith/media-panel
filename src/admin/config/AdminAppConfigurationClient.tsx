@@ -407,7 +407,7 @@ export default function AdminAppConfigurationClient({
         return <>
           <ChecklistRow
             title="Backend Orchestrator"
-            status={cloudflareWorkerIntegration.configured || hasBackendOrchestrator}
+            status={cloudflareWorkerIntegration.configured}
           >
             {cloudflareWorkerIntegration.configured
               ? renderContent(cloudflareWorkerIntegration.workerUrl)
