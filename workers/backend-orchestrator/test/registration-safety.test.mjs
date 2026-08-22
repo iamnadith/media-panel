@@ -79,6 +79,23 @@ test('large registration backlogs are selected one FIFO batch at a time', () => 
   );
 });
 
+test('the free-worker registration consumer claims exactly one file', () => {
+  const scanStart = workerSource.indexOf('const scanAndRegisterWithLease');
+  const scanEnd = workerSource.indexOf('const scanAndRegister =', scanStart);
+  const source = workerSource.slice(scanStart, scanEnd);
+  assert.match(source, /const registerBatchSize = 1;/);
+  assert.match(workerSource, /single durable lease plus a single claim prevents overlap/);
+});
+
+test('an existing registration claim blocks later cron scans', () => {
+  const scanStart = workerSource.indexOf('const scanAndRegisterWithLease');
+  const scanEnd = workerSource.indexOf('const scanAndRegister =', scanStart);
+  const source = workerSource.slice(scanStart, scanEnd);
+  assert.match(source, /const activeRegistration = await getActiveRegistrationStatusRows\(env\)/);
+  assert.match(source, /if \(activeRegistration\.length > 0\)/);
+  assert.match(workerSource, /WHERE status='registering'[\s\S]*?LIMIT 1/);
+});
+
 test('video processing claims the oldest pending upload first', () => {
   const claimStart = workerSource.indexOf('const claimVideoJobs');
   const claimEnd = workerSource.indexOf('const getProcessorJobs', claimStart);

@@ -170,7 +170,11 @@ const getRuntimeProcessingSettings = async (env: Env) => {
     defaults.orchestratorEnabled = enabled('orchestratorEnabled', true);
     defaults.registrationEnabled = enabled('registrationEnabled', true);
     defaults.videoProcessingEnabled = enabled('videoProcessingEnabled', true);
-    defaults.registerBatchSize = number('registerBatchSize', defaults.registerBatchSize, 1, 100);
+    // Cloudflare Free has a 10 ms CPU budget. Registration includes storage
+    // copy/verification and a multi-table commit, so concurrent claims turn a
+    // transient failure into overlapping work. Keep the global FIFO consumer
+    // deliberately single-file.
+    defaults.registerBatchSize = number('registerBatchSize', 1, 1, 1);
     defaults.maxRegisterPasses = number('maxRegisterPasses', defaults.maxRegisterPasses, 1, 20);
     defaults.staleProcessingMinutes = number('staleProcessingMinutes', defaults.staleProcessingMinutes, 1, 1440);
     defaults.staleRegistrationMinutes = number('staleRegistrationMinutes', defaults.staleRegistrationMinutes, 1, 1440);
@@ -2377,6 +2381,18 @@ const getQueuedRegistrationStatusRows = async (env: Env, limit: number) => {
   `) as unknown as RegistrationStatusRow[];
 };
 
+const getActiveRegistrationStatusRows = async (env: Env) => {
+  await ensureRegistrationStatusTable(env);
+  const sql = sqlForEnv(env);
+  return (await sql`
+    SELECT url
+    FROM worker_registration_status
+    WHERE status='registering'
+    ORDER BY updated_at ASC, url ASC
+    LIMIT 1
+  `) as unknown as Array<{ url: string }>;
+};
+
 type HlsArtifactMetadata = {
   key?: string
   size?: number
@@ -2979,10 +2995,26 @@ const scanAndRegisterWithLease = async (
   await clearOldCompletedRegistrationStatuses(env);
   await retryStaleProcessing(env);
 
-  const registerBatchSize = getNumber(env.REGISTER_BATCH_SIZE, 1, {
-    min: 1,
-    max: 10,
-  });
+  // A Worker isolate can disappear while a storage copy is pending. Until that
+  // one claim is recovered as stale, it is the sole registration allowed to
+  // exist. Without this guard, the next cron invocation kept adding another
+  // `registering` row even though the Admin setting was already one.
+  const activeRegistration = await getActiveRegistrationStatusRows(env);
+  if (activeRegistration.length > 0) {
+    return {
+      registered: 0,
+      registrationPasses: 0,
+      registrationRemaining: 1,
+      pendingVideos: await countPendingVideos(env),
+      missingProcessingSources: 0,
+      scanSkipped: true,
+    };
+  }
+
+  // Never mark a batch as registering before its predecessor is committed.
+  // This is intentionally fixed at one even if an old persisted admin value
+  // is higher; a single durable lease plus a single claim prevents overlap.
+  const registerBatchSize = 1;
   const maxRegisterPasses = getNumber(env.MAX_REGISTER_PASSES, 1, {
     min: 1,
     max: 10,

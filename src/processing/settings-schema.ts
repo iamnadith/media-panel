@@ -19,7 +19,7 @@ export type ProcessingSettings = {
 };
 
 export const PROCESSING_NUMBER_LIMITS = {
-  registerBatchSize: [1, 100],
+  registerBatchSize: [1, 1],
   maxRegisterPasses: [1, 20],
   staleProcessingMinutes: [1, 1_440],
   staleRegistrationMinutes: [1, 1_440],
